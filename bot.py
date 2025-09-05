@@ -1,3 +1,4 @@
+import os
 import requests
 import pandas as pd
 import numpy as np
@@ -43,7 +44,8 @@ class DerivMarketAnalyzer:
                     "active_symbols": "brief",
                     "product_type": "basic",
                     "landing_company": "virtual"
-                }
+                },
+                timeout=10
             )
             response.raise_for_status()
             data = response.json()
@@ -79,7 +81,8 @@ class DerivMarketAnalyzer:
                     "ticks_history": symbol,
                     "count": count,
                     "style": "ticks"
-                }
+                },
+                timeout=10
             )
             response.raise_for_status()
             data = response.json()
@@ -230,7 +233,8 @@ class TelegramBot:
                     "chat_id": self.channel_id,
                     "text": message,
                     "parse_mode": "HTML"
-                }
+                },
+                timeout=10
             )
             response.raise_for_status()
             
@@ -284,9 +288,13 @@ def main():
     """
     Main function to run the Deriv market analysis and Telegram signaling
     """
-    # Configuration - Replace with your actual values
-    TELEGRAM_BOT_TOKEN = "YOUR_TELEGRAM_BOT_TOKEN"
-    TELEGRAM_CHANNEL_ID = "@YOUR_CHANNEL_NAME"  # or "-1001234567890" for private channels
+    # Get configuration from environment variables
+    TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
+    TELEGRAM_CHANNEL_ID = os.environ.get("TELEGRAM_CHANNEL_ID")
+    
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHANNEL_ID:
+        logger.error("Missing required environment variables: TELEGRAM_BOT_TOKEN, TELEGRAM_CHANNEL_ID")
+        return
     
     # Initialize components
     analyzer = DerivMarketAnalyzer()
