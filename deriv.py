@@ -22,12 +22,9 @@ class DerivMarketAnalyzer:
     def __init__(self, deriv_app_id: Optional[str] = None):
         """
         Initialize the Deriv market analyzer
-        
-        Args:
-            deriv_app_id: Deriv application ID (optional for public API access)
         """
         self.deriv_app_id = deriv_app_id or "1089"  # Default public API ID
-        self.api_url = "https://api.deriv.com/api/v1"
+        self.api_url = "https://api.deriv.com"
         self.markets_data = {}
         
     def fetch_markets(self) -> List[Dict]:
@@ -38,10 +35,10 @@ class DerivMarketAnalyzer:
             List of market dictionaries
         """
         try:
+            # Use the correct API endpoint for active symbols
             response = requests.get(
                 f"{self.api_url}/active_symbols",
                 params={
-                    "active_symbols": "brief",
                     "product_type": "basic",
                     "landing_company": "virtual"
                 },
@@ -51,10 +48,11 @@ class DerivMarketAnalyzer:
             data = response.json()
             
             # Filter for derived indices
-            derived_markets = [
-                market for market in data.get("active_symbols", [])
-                if market.get("market_display_name") in ["Volatility Indices", "Step Index", "Range Break"]
-            ]
+            derived_markets = []
+            for market in data.get("active_symbols", []):
+                market_type = market.get("market_display_name", "")
+                if "Volatility" in market_type or "Step" in market_type or "Range" in market_type:
+                    derived_markets.append(market)
             
             logger.info(f"Fetched {len(derived_markets)} derived markets")
             return derived_markets
@@ -66,17 +64,11 @@ class DerivMarketAnalyzer:
     def fetch_market_quotes(self, symbol: str, count: int = 100) -> Optional[pd.DataFrame]:
         """
         Fetch historical quotes for a specific market symbol
-        
-        Args:
-            symbol: Market symbol to fetch data for
-            count: Number of data points to retrieve
-            
-        Returns:
-            DataFrame with market data or None if failed
         """
         try:
+            # Use the correct API endpoint for ticks
             response = requests.get(
-                f"{self.api_url}/ticks",
+                f"{self.api_url}/ticks_history",
                 params={
                     "ticks_history": symbol,
                     "count": count,
@@ -104,13 +96,6 @@ class DerivMarketAnalyzer:
     def analyze_market(self, symbol: str, market_name: str) -> Optional[Dict]:
         """
         Analyze a specific market for trading opportunities
-        
-        Args:
-            symbol: Market symbol
-            market_name: Display name of the market
-            
-        Returns:
-            Dictionary with analysis results or None if analysis failed
         """
         try:
             # Fetch market data
@@ -175,9 +160,6 @@ class DerivMarketAnalyzer:
     def analyze_all_markets(self) -> List[Dict]:
         """
         Analyze all available derived markets
-        
-        Returns:
-            List of analysis results with potential signals
         """
         markets = self.fetch_markets()
         signals = []
@@ -203,10 +185,6 @@ class TelegramBot:
     def __init__(self, bot_token: str, channel_id: str):
         """
         Initialize Telegram bot
-        
-        Args:
-            bot_token: Telegram bot token from BotFather
-            channel_id: Telegram channel ID (with @ for public channels or -100 for private)
         """
         self.bot_token = bot_token
         self.channel_id = channel_id
@@ -215,12 +193,6 @@ class TelegramBot:
     def send_signal(self, analysis: Dict) -> bool:
         """
         Send trading signal to Telegram channel
-        
-        Args:
-            analysis: Market analysis dictionary
-            
-        Returns:
-            True if message was sent successfully, False otherwise
         """
         try:
             # Format the message
@@ -248,12 +220,6 @@ class TelegramBot:
     def format_signal_message(self, analysis: Dict) -> str:
         """
         Format analysis results into a readable Telegram message
-        
-        Args:
-            analysis: Market analysis dictionary
-            
-        Returns:
-            Formatted HTML message string
         """
         symbol = analysis["symbol"]
         market = analysis["market_name"]
