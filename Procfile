@@ -1,1 +1,1 @@
-worker: python deriv_analyzer.py
+worker: python www.deriv app.com.py
