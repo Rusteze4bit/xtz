@@ -289,8 +289,8 @@ def main():
     Main function to run the Deriv market analysis and Telegram signaling
     """
     # Get configuration from environment variables
-    TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
-    TELEGRAM_CHANNEL_ID = os.environ.get("TELEGRAM_CHANNEL_ID")
+    TELEGRAM_BOT_TOKEN = os.environ.get("8256982239:AAFZLRbcmRVgO1SiWOBqU7Hf00z6VU6nB64")
+    TELEGRAM_CHANNEL_ID = os.environ.get("1002810133474")
     
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHANNEL_ID:
         logger.error("Missing required environment variables: TELEGRAM_BOT_TOKEN, TELEGRAM_CHANNEL_ID")
