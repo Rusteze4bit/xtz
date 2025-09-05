@@ -1,228 +1,322 @@
-import time
 import requests
-import json
-import websocket
-import threading
-from datetime import datetime, timedelta
-import statistics
+import pandas as pd
+import numpy as np
+import time
+import logging
+from datetime import datetime
+from typing import Dict, List, Optional
 
-# Telegram bot credentials
-TOKEN = "8256982239:AAFZLRbcmRVgO1SiWOBqU7Hf00z6VU6nB64"
-GROUP_ID = -1002810133474
-BASE_URL = f"https://api.telegram.org/bot{TOKEN}"
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler("deriv_analysis.log"),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger("DerivAnalyzer")
 
-# Deriv API WebSocket endpoint
-DERIV_API_URL = "wss://ws.binaryws.com/websockets/v3?app_id=1089"
+class DerivMarketAnalyzer:
+    def __init__(self, deriv_app_id: Optional[str] = None):
+        """
+        Initialize the Deriv market analyzer
+        
+        Args:
+            deriv_app_id: Deriv application ID (optional for public API access)
+        """
+        self.deriv_app_id = deriv_app_id or "1089"  # Default public API ID
+        self.api_url = "https://api.deriv.com/api/v1"
+        self.markets_data = {}
+        
+    def fetch_markets(self) -> List[Dict]:
+        """
+        Fetch available derived indices markets from Deriv API
+        
+        Returns:
+            List of market dictionaries
+        """
+        try:
+            response = requests.get(
+                f"{self.api_url}/active_symbols",
+                params={
+                    "active_symbols": "brief",
+                    "product_type": "basic",
+                    "landing_company": "virtual"
+                }
+            )
+            response.raise_for_status()
+            data = response.json()
+            
+            # Filter for derived indices
+            derived_markets = [
+                market for market in data.get("active_symbols", [])
+                if market.get("market_display_name") in ["Volatility Indices", "Step Index", "Range Break"]
+            ]
+            
+            logger.info(f"Fetched {len(derived_markets)} derived markets")
+            return derived_markets
+            
+        except Exception as e:
+            logger.error(f"Error fetching markets: {e}")
+            return []
+    
+    def fetch_market_quotes(self, symbol: str, count: int = 100) -> Optional[pd.DataFrame]:
+        """
+        Fetch historical quotes for a specific market symbol
+        
+        Args:
+            symbol: Market symbol to fetch data for
+            count: Number of data points to retrieve
+            
+        Returns:
+            DataFrame with market data or None if failed
+        """
+        try:
+            response = requests.get(
+                f"{self.api_url}/ticks",
+                params={
+                    "ticks_history": symbol,
+                    "count": count,
+                    "style": "ticks"
+                }
+            )
+            response.raise_for_status()
+            data = response.json()
+            
+            if "history" not in data:
+                return None
+                
+            ticks = data["history"]["ticks"]
+            df = pd.DataFrame(ticks)
+            df['quote'] = df['quote'].astype(float)
+            df['epoch'] = pd.to_datetime(df['epoch'], unit='s')
+            
+            return df
+            
+        except Exception as e:
+            logger.error(f"Error fetching quotes for {symbol}: {e}")
+            return None
+    
+    def analyze_market(self, symbol: str, market_name: str) -> Optional[Dict]:
+        """
+        Analyze a specific market for trading opportunities
+        
+        Args:
+            symbol: Market symbol
+            market_name: Display name of the market
+            
+        Returns:
+            Dictionary with analysis results or None if analysis failed
+        """
+        try:
+            # Fetch market data
+            df = self.fetch_market_quotes(symbol)
+            if df is None or len(df) < 50:
+                return None
+            
+            # Calculate indicators
+            df['sma_20'] = df['quote'].rolling(window=20).mean()
+            df['sma_50'] = df['quote'].rolling(window=50).mean()
+            df['price_change'] = df['quote'].pct_change()
+            df['volatility'] = df['quote'].rolling(window=20).std()
+            
+            current_price = df['quote'].iloc[-1]
+            sma_20 = df['sma_20'].iloc[-1]
+            sma_50 = df['sma_50'].iloc[-1]
+            volatility = df['volatility'].iloc[-1]
+            
+            # Calculate recovery metrics
+            recent_low = df['quote'].tail(10).min()
+            recent_high = df['quote'].tail(10).max()
+            recovery_from_low = ((current_price - recent_low) / recent_low) * 100
+            recovery_from_high = ((current_price - recent_high) / recent_high) * 100
+            
+            # Determine signal based on criteria
+            signal = None
+            trade_type = None
+            
+            # Check for over 1 and recovery between 5 and 8
+            if (abs(recovery_from_low) > 1 and 
+                5 <= abs(recovery_from_low) <= 8):
+                signal = "BUY" if recovery_from_low > 0 else "SELL"
+                trade_type = f"Recovery between 5-8% ({recovery_from_low:.2f}%)"
+            
+            # Check for under 5 recovery
+            elif (abs(recovery_from_high) > 1 and 
+                  abs(recovery_from_high) < 5):
+                signal = "BUY" if recovery_from_high < 0 else "SELL"
+                trade_type = f"Recovery under 5% ({recovery_from_high:.2f}%)"
+            
+            # Prepare analysis result
+            analysis_result = {
+                "symbol": symbol,
+                "market_name": market_name,
+                "current_price": current_price,
+                "sma_20": sma_20,
+                "sma_50": sma_50,
+                "volatility": volatility,
+                "recovery_from_low": recovery_from_low,
+                "recovery_from_high": recovery_from_high,
+                "signal": signal,
+                "trade_type": trade_type,
+                "timestamp": datetime.now().isoformat()
+            }
+            
+            return analysis_result
+            
+        except Exception as e:
+            logger.error(f"Error analyzing {symbol}: {e}")
+            return None
+    
+    def analyze_all_markets(self) -> List[Dict]:
+        """
+        Analyze all available derived markets
+        
+        Returns:
+            List of analysis results with potential signals
+        """
+        markets = self.fetch_markets()
+        signals = []
+        
+        for market in markets:
+            symbol = market.get("symbol")
+            market_name = market.get("market_display_name", "Unknown")
+            
+            logger.info(f"Analyzing {symbol} ({market_name})")
+            analysis = self.analyze_market(symbol, market_name)
+            
+            if analysis and analysis.get("signal"):
+                signals.append(analysis)
+                logger.info(f"Signal found for {symbol}: {analysis['signal']}")
+            
+            # Be respectful to the API
+            time.sleep(0.5)
+        
+        return signals
 
-# Markets to analyze
-MARKETS = ["R_10", "R_25", "R_50", "R_75", "R_100"]
 
-# Market symbol to name mapping
-MARKET_NAMES = {
-    "R_10": "Volatility 10 Index",
-    "R_25": "Volatility 25 Index",
-    "R_50": "Volatility 50 Index",
-    "R_75": "Volatility 75 Index",
-    "R_100": "Volatility 100 Index",
-}
+class TelegramBot:
+    def __init__(self, bot_token: str, channel_id: str):
+        """
+        Initialize Telegram bot
+        
+        Args:
+            bot_token: Telegram bot token from BotFather
+            channel_id: Telegram channel ID (with @ for public channels or -100 for private)
+        """
+        self.bot_token = bot_token
+        self.channel_id = channel_id
+        self.api_url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+    
+    def send_signal(self, analysis: Dict) -> bool:
+        """
+        Send trading signal to Telegram channel
+        
+        Args:
+            analysis: Market analysis dictionary
+            
+        Returns:
+            True if message was sent successfully, False otherwise
+        """
+        try:
+            # Format the message
+            message = self.format_signal_message(analysis)
+            
+            # Send to Telegram
+            response = requests.post(
+                self.api_url,
+                json={
+                    "chat_id": self.channel_id,
+                    "text": message,
+                    "parse_mode": "HTML"
+                }
+            )
+            response.raise_for_status()
+            
+            logger.info(f"Signal sent to Telegram for {analysis['symbol']}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error sending Telegram message: {e}")
+            return False
+    
+    def format_signal_message(self, analysis: Dict) -> str:
+        """
+        Format analysis results into a readable Telegram message
+        
+        Args:
+            analysis: Market analysis dictionary
+            
+        Returns:
+            Formatted HTML message string
+        """
+        symbol = analysis["symbol"]
+        market = analysis["market_name"]
+        price = analysis["current_price"]
+        signal = analysis["signal"]
+        trade_type = analysis["trade_type"]
+        recovery_low = analysis["recovery_from_low"]
+        recovery_high = analysis["recovery_from_high"]
+        volatility = analysis["volatility"]
+        timestamp = datetime.fromisoformat(analysis["timestamp"]).strftime("%Y-%m-%d %H:%M:%S")
+        
+        message = f"""
+🚀 <b>Deriv Trading Signal</b> 🚀
 
-# Store last 200 ticks for analysis
-market_ticks = {market: [] for market in MARKETS}
+<b>Market:</b> {market} ({symbol})
+<b>Signal:</b> <code>{signal}</code>
+<b>Type:</b> {trade_type}
+<b>Current Price:</b> {price:.4f}
+<b>Volatility:</b> {volatility:.4f}
+<b>Recovery from Low:</b> {recovery_low:.2f}%
+<b>Recovery from High:</b> {recovery_high:.2f}%
 
-# Track message IDs
-active_messages = []
-last_expired_id = None
+<b>Timestamp:</b> {timestamp}
 
-
-def send_telegram_message(message: str, image_path="logo.png", keep=False):
-    """Send a message with logo and Run button."""
-    keyboard = {
-        "inline_keyboard": [[
-            {"text": "🚀 Run on KashyTrader", "url": "https://www.kashytrader.site/"}
-        ]]
-    }
-
-    with open(image_path, "rb") as img:
-        resp = requests.post(
-            f"{BASE_URL}/sendPhoto",
-            data={
-                "chat_id": GROUP_ID,
-                "caption": message,
-                "parse_mode": "HTML",
-                "reply_markup": json.dumps(keyboard),
-            },
-            files={"photo": img}
-        )
-
-    if resp.ok:
-        msg_id = resp.json()["result"]["message_id"]
-        if not keep:
-            active_messages.append(msg_id)
-        return msg_id
-    return None
+⚠️ <i>Disclaimer: This is not financial advice. Trade at your own risk.</i>
+        """
+        
+        return message
 
 
-def delete_messages():
-    """Delete pre+main messages from last cycle."""
-    global active_messages
-    for msg_id in active_messages:
-        requests.post(f"{BASE_URL}/deleteMessage", data={
-            "chat_id": GROUP_ID,
-            "message_id": msg_id
-        })
-    active_messages = []
-
-
-def delete_last_expired():
-    """Delete last expired message before sending a new cycle."""
-    global last_expired_id
-    if last_expired_id:
-        requests.post(f"{BASE_URL}/deleteMessage", data={
-            "chat_id": GROUP_ID,
-            "message_id": last_expired_id
-        })
-        last_expired_id = None
-
-
-def analyze_market(market: str, ticks: list):
+def main():
     """
-    Improved analysis:
-      - Even / Odd distribution
-      - Over 3 / Under 6 distribution
-      - Last digit streak detection
-      - Volatility filter (stddev of digits)
+    Main function to run the Deriv market analysis and Telegram signaling
     """
-    if len(ticks) < 30:
-        return None
-
-    last_digits = [int(str(t)[-1]) for t in ticks]
-
-    even_count = sum(d % 2 == 0 for d in last_digits)
-    odd_count = len(last_digits) - even_count
-    over3_count = sum(d > 3 for d in last_digits)
-    under6_count = sum(d < 6 for d in last_digits)
-
-    # streak detection (bias if last 5 digits lean one way)
-    last5 = last_digits[-5:]
-    streak_even = sum(d % 2 == 0 for d in last5) / 5
-    streak_over3 = sum(d > 3 for d in last5) / 5
-
-    # volatility filter (stddev of last 20 digits)
-    vol = statistics.pstdev(last_digits[-20:])
-
-    # weights
-    strength = {
-        "Even": (even_count / len(last_digits) + streak_even * 0.4) / (1 + vol/10),
-        "Odd": (odd_count / len(last_digits) + (1-streak_even) * 0.4) / (1 + vol/10),
-        "Over 3": (over3_count / len(last_digits) + streak_over3 * 0.4) / (1 + vol/10),
-        "Under 6": (under6_count / len(last_digits) + (1-streak_over3) * 0.4) / (1 + vol/10),
-    }
-
-    best_signal = max(strength, key=strength.get)
-    confidence = strength[best_signal]
-
-    return best_signal, confidence
-
-
-def fetch_and_analyze():
-    """Pick the best market and send full signal cycle."""
-    global last_expired_id
-
-    # delete old expired before new cycle
-    delete_last_expired()
-
-    best_market, best_signal, best_confidence = None, None, 0
-
-    for market in MARKETS:
-        if len(market_ticks[market]) > 20:
-            result = analyze_market(market, market_ticks[market])
-            if result:
-                signal, confidence = result
-                if confidence > best_confidence:
-                    best_confidence = confidence
-                    best_signal = signal
-                    best_market = market
-
-    if best_market:
-        now = datetime.now()
-        entry_time = now + timedelta(minutes=1)
-        expiry_time = now + timedelta(minutes=4)
-        next_signal_time = now + timedelta(minutes=10)
-
-        market_name = MARKET_NAMES.get(best_market, best_market)
-
-        # -------- PRE-NOTIFICATION --------
-        pre_msg = (
-             f"📢 <b>Upcoming Signal Alert</b>\n\n"
-             f"⏰ Entry at <b>{(now + timedelta(minutes=1)).strftime('%H:%M:%S')}</b>\n\n"
-             f"⚡ Get ready!"
-        )
-        send_telegram_message(pre_msg)
-        time.sleep(60)
-
-        # -------- MAIN SIGNAL --------
-        entry_digit = int(str(market_ticks[best_market][-1])[-1]) if market_ticks[best_market] else None
-        extra_note = "\n\n🤖 Tip: Use the FREE <b>Over 3 Bot</b> in the Free Bots section!" if best_signal == "Over 3" else ""
-        main_msg = (
-            f"⚡ <b>KashyTrader Premium Signal</b>\n\n"
-           f"⏰ Time: {now.strftime('%Y-%m-%d %H:%M:%S')}\n"
-            f"📊 Market: {market_name}\n"
-            f"🎯 Signal: <b>{best_signal}</b>\n"
-            f"🔢 Entry Point Digit: <b>{entry_digit}</b>\n"
-            f"📈 Confidence: <b>{best_confidence:.2%}</b>\n"
-            f"🔥 Execute now!"
-        )
-        send_telegram_message(main_msg)
-        time.sleep(180)  # 3 mins duration
-
-        # -------- POST-NOTIFICATION --------
-        post_msg = (
-            f"✅ <b>Signal Expired</b>\n\n"
-            f"📊 Market: {market_name}\n"
-             f"🕒 Expired at: {now.strftime('%H:%M:%S')}\n\n"
-            f"🔔 Next Signal Expected: {next_signal_time.strftime('%H:%M:%S')}"
-        )
-        last_expired_id = send_telegram_message(post_msg, keep=True)
-
-        # -------- CLEANUP OLD MESSAGES --------
-        time.sleep(30)
-        delete_messages()
-
-
-def on_message(ws, message):
-    """Handle incoming tick data."""
-    data = json.loads(message)
-
-    if "tick" in data:
-        symbol = data["tick"]["symbol"]
-        quote = data["tick"]["quote"]
-
-        market_ticks[symbol].append(quote)
-        if len(market_ticks[symbol]) > 200:
-            market_ticks[symbol].pop(0)
-
-
-def subscribe_to_ticks(ws):
-    for market in MARKETS:
-        ws.send(json.dumps({"ticks": market}))
-
-
-def run_websocket():
-    ws = websocket.WebSocketApp(
-        DERIV_API_URL,
-        on_message=on_message
-    )
-    ws.on_open = lambda w: subscribe_to_ticks(w)
-    ws.run_forever()
-
-
-def schedule_signals():
+    # Configuration - Replace with your actual values
+    TELEGRAM_BOT_TOKEN = "YOUR_TELEGRAM_BOT_TOKEN"
+    TELEGRAM_CHANNEL_ID = "@YOUR_CHANNEL_NAME"  # or "-1001234567890" for private channels
+    
+    # Initialize components
+    analyzer = DerivMarketAnalyzer()
+    telegram_bot = TelegramBot(TELEGRAM_BOT_TOKEN, TELEGRAM_CHANNEL_ID)
+    
+    logger.info("Starting Deriv market analysis...")
+    
+    # Run analysis in a loop
     while True:
-        fetch_and_analyze()
-        time.sleep(60)  # every 10 min
+        try:
+            signals = analyzer.analyze_all_markets()
+            
+            if signals:
+                logger.info(f"Found {len(signals)} signals")
+                for signal in signals:
+                    telegram_bot.send_signal(signal)
+            else:
+                logger.info("No signals found in this iteration")
+            
+            # Wait before next analysis (e.g., 15 minutes)
+            logger.info("Waiting for next analysis cycle...")
+            time.sleep(900)  # 15 minutes
+            
+        except KeyboardInterrupt:
+            logger.info("Analysis stopped by user")
+            break
+        except Exception as e:
+            logger.error(f"Unexpected error in main loop: {e}")
+            time.sleep(300)  # Wait 5 minutes before retrying after error
 
 
 if __name__ == "__main__":
-    ws_thread = threading.Thread(target=run_websocket)
-    ws_thread.start()
-    schedule_signals()
+    main()
